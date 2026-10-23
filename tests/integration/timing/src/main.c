@@ -10,6 +10,7 @@
 
 #include "gpio_spy.h"
 #include "zstep_ramp.h"
+#include "zstep_shaper.h"
 
 #define FREQ      1000000U
 /* Default 2000 ns step width at 1 MHz rounded up, plus one tick of counter phase. */
@@ -38,14 +39,15 @@ struct motor {
 	}
 
 static struct motor motors[] = {
-	MOTOR(DT_NODELABEL(motor_a)),
-	MOTOR(DT_NODELABEL(motor_b)),
-	MOTOR(DT_NODELABEL(motor_c)),
+	MOTOR(DT_NODELABEL(motor_a)), MOTOR(DT_NODELABEL(motor_b)), MOTOR(DT_NODELABEL(motor_c)),
+	MOTOR(DT_NODELABEL(motor_d)), MOTOR(DT_NODELABEL(motor_e)),
 };
 
 static struct motor *const a = &motors[0];
 static struct motor *const b = &motors[1];
 static struct motor *const c = &motors[2];
+static struct motor *const d = &motors[3];
+static struct motor *const e = &motors[4];
 
 static const struct device *const counter = DEVICE_DT_GET(DT_NODELABEL(counter0));
 static const struct device *const spy = DEVICE_DT_GET(DT_NODELABEL(spy));
@@ -68,7 +70,7 @@ static const struct stepper_ctrl_ramp fast = {
 	.deceleration_max = 100000,
 };
 
-static uint32_t got[3][MAX_TICKS];
+static uint32_t got[ARRAY_SIZE(motors)][MAX_TICKS];
 static uint32_t want[MAX_TICKS];
 
 static void on_event(const struct device *dev, enum stepper_ctrl_event event, void *user_data)
@@ -217,40 +219,46 @@ ZTEST(zstep_timing, test_motors_do_not_disturb_each_other)
 	check_move(c, got[2], &pc, 3000);
 }
 
-ZTEST(zstep_timing, test_reversal_respects_dir_timing)
+/* Checks DIR setup and hold around every direction change, returns how many there were. */
+static int check_dir_timing(const struct motor *m, int dir_level, int32_t net)
 {
 	const struct gpio_spy_edge *edges;
-	int dir_level = gpio_pin_get_raw(spy, a->dir_pin);
 	uint32_t last_step = 0;
 	uint32_t last_dir = 0;
 	int reversals = 0;
-	int net = 0;
-
-	zassert_ok(stepper_ctrl_configure_ramp(a->dev, &slow));
-	zassert_ok(stepper_ctrl_move_to(a->dev, 300));
-	k_msleep(150);
-	zassert_ok(stepper_ctrl_move_to(a->dev, -200));
-	wait_for(a, STEPPER_CTRL_EVENT_STEPS_COMPLETED);
-	zassert_equal(position(a), -200);
 
 	for (size_t i = 0, count = gpio_spy_edges(&edges); i < count; i++) {
-		if (edges[i].pin == a->dir_pin) {
+		if (edges[i].pin == m->dir_pin) {
 			zassert_true(edges[i].tick - last_step >= MIN_DELAY, "DIR hold violated");
 			dir_level = edges[i].level;
 			last_dir = edges[i].tick;
 			reversals++;
 		}
 
-		if (edges[i].pin == a->step_pin && edges[i].level == 1) {
+		if (edges[i].pin == m->step_pin && edges[i].level == 1) {
 			zassert_true(reversals == 0 || edges[i].tick - last_dir >= MIN_DELAY,
 				     "DIR setup violated");
-			net += dir_level != a->inverted ? 1 : -1;
+			net -= dir_level != m->inverted ? 1 : -1;
 			last_step = edges[i].tick;
 		}
 	}
 
-	zassert_equal(reversals, 1);
-	zassert_equal(net, -200);
+	zassert_equal(net, 0, "%s: steps do not add up to the move", m->dev->name);
+	return reversals;
+}
+
+ZTEST(zstep_timing, test_reversal_respects_dir_timing)
+{
+	int dir_level = gpio_pin_get_raw(spy, a->dir_pin);
+
+	zassert_ok(stepper_ctrl_configure_ramp(a->dev, &slow));
+	zassert_ok(stepper_ctrl_move_to(a->dev, 300));
+	k_msleep(150);
+	zassert_ok(stepper_ctrl_move_to(a->dev, -200));
+	wait_for(a, STEPPER_CTRL_EVENT_STEPS_COMPLETED);
+
+	zassert_equal(position(a), -200);
+	zassert_equal(check_dir_timing(a, dir_level, -200), 1);
 }
 
 ZTEST(zstep_timing, test_stop_decelerates)
@@ -298,7 +306,7 @@ ZTEST(zstep_timing, test_group_moves_along_a_line)
 	struct zstep_profile pc = p;
 
 	zassert_ok(zstep_group_move_by(devs, steps, ARRAY_SIZE(devs), &fast));
-	ARRAY_FOR_EACH(motors, i) {
+	ARRAY_FOR_EACH(devs, i) {
 		wait_for(&motors[i], STEPPER_CTRL_EVENT_STEPS_COMPLETED);
 		zassert_equal(position(&motors[i]), steps[i]);
 		zassert_equal(step_ticks(&motors[i], got[i]), abs(steps[i]));
@@ -369,6 +377,208 @@ ZTEST(zstep_timing, test_rejects_bad_limits)
 	zassert_ok(stepper_ctrl_run(a->dev, STEPPER_CTRL_DIRECTION_POSITIVE));
 	zassert_equal(stepper_ctrl_configure_ramp(a->dev, &quick), -EBUSY);
 	zassert_ok(stepper_ctrl_set_microstep_interval(a->dev, 2 * NSEC_PER_MSEC));
+}
+
+static struct zstep_shaper shaper_of(enum zstep_shaper_type type)
+{
+	struct zstep_shaper s;
+
+	zassert_ok(zstep_shaper_init(&s, type, 4000, 100, FREQ));
+	return s;
+}
+
+/* Physical step times of a shaped n step move, relative to its first commanded step. */
+static size_t shaped_model(const struct zstep_profile *p, const struct zstep_shaper *s, uint32_t n,
+			   uint32_t *out, uint32_t *command_end)
+{
+	static struct zstep_echo_step buffer[2048];
+	struct zstep_echo echo = {
+		.shaper = *s,
+		.buf = buffer,
+		.size = ARRAY_SIZE(buffer),
+		.top = UINT32_MAX,
+	};
+	struct zstep_ramp r;
+	uint32_t made = 0;
+	uint32_t t = 0;
+	size_t count = 0;
+
+	zstep_ramp_reset(&r, p);
+	zstep_echo_reset(&echo, 0);
+	for (;;) {
+		uint32_t at;
+		int8_t dir;
+
+		switch (zstep_echo_next(&echo, &at, &dir)) {
+		case ZSTEP_ECHO_STEP:
+			out[count++] = at;
+			break;
+		case ZSTEP_ECHO_NEED_COMMAND:
+			if (made == n) {
+				echo.closed = true;
+				break;
+			}
+			zassert_ok(zstep_echo_push(&echo, t, 1));
+			*command_end = t;
+			made++;
+			t += zstep_ramp_next(&r, n - made);
+			break;
+		case ZSTEP_ECHO_DONE:
+			return count;
+		}
+	}
+}
+
+static void check_pulses(const struct motor *m)
+{
+	const struct gpio_spy_edge *edges;
+	uint32_t rise = 0;
+	bool first = true;
+
+	for (size_t i = 0, count = gpio_spy_edges(&edges); i < count; i++) {
+		if (edges[i].pin != m->step_pin) {
+			continue;
+		}
+
+		if (edges[i].level == 0) {
+			zassert_equal(edges[i].tick - rise, MIN_DELAY, "pulse width");
+			continue;
+		}
+
+		zassert_true(first || edges[i].tick - rise >= 2 * MIN_DELAY, "steps too close");
+		rise = edges[i].tick;
+		first = false;
+	}
+}
+
+ZTEST(zstep_timing, test_shaped_motors_follow_model_and_keep_others_intact)
+{
+	static uint32_t alone[MAX_TICKS];
+	static uint32_t model[MAX_TICKS];
+	struct motor *shaped[] = {d, e};
+	const enum zstep_shaper_type types[] = {ZSTEP_SHAPER_ZVD, ZSTEP_SHAPER_EI};
+	struct zstep_profile p = profile_of(&fast);
+
+	zassert_ok(stepper_ctrl_configure_ramp(b->dev, &quick));
+	zassert_ok(stepper_ctrl_move_by(b->dev, 800));
+	wait_for(b, STEPPER_CTRL_EVENT_STEPS_COMPLETED);
+	zassert_equal(step_ticks(b, alone), 800);
+
+	gpio_spy_reset();
+	ARRAY_FOR_EACH(shaped, i) {
+		zassert_ok(stepper_ctrl_configure_ramp(shaped[i]->dev, &fast));
+		zassert_ok(stepper_ctrl_move_by(shaped[i]->dev, 3000));
+	}
+	zassert_ok(stepper_ctrl_move_by(b->dev, 800));
+
+	wait_for(b, STEPPER_CTRL_EVENT_STEPS_COMPLETED);
+	zassert_equal(step_ticks(b, got[1]), 800);
+	for (int k = 0; k < 800; k++) {
+		zassert_equal(got[1][k] - got[1][0], alone[k] - alone[0], "step %d moved", k);
+	}
+
+	ARRAY_FOR_EACH(shaped, i) {
+		struct zstep_shaper s = shaper_of(types[i]);
+		uint32_t command_end = 0;
+		size_t n = shaped_model(&p, &s, 3000, model, &command_end);
+
+		wait_for(shaped[i], STEPPER_CTRL_EVENT_STEPS_COMPLETED);
+		zassert_equal(position(shaped[i]), 3000);
+		zassert_equal(n, 3000);
+		zassert_equal(step_ticks(shaped[i], got[3 + i]), 3000);
+		zassert_equal(model[n - 1], command_end + s.delay[s.impulses - 1],
+			      "the last step lags the command by the shaper duration");
+		for (size_t k = 0; k < n; k++) {
+			zassert_equal(got[3 + i][k] - got[3 + i][0], model[k] - model[0],
+				      "%s: step %zu at %u, expected %u", shaped[i]->dev->name, k,
+				      got[3 + i][k] - got[3 + i][0], model[k] - model[0]);
+		}
+
+		check_pulses(shaped[i]);
+	}
+}
+
+ZTEST(zstep_timing, test_shaped_reversal)
+{
+	struct motor *shaped[] = {d, e};
+
+	ARRAY_FOR_EACH(shaped, i) {
+		struct motor *m = shaped[i];
+		int dir_level = gpio_pin_get_raw(spy, m->dir_pin);
+
+		gpio_spy_reset();
+		zassert_ok(stepper_ctrl_configure_ramp(m->dev, &fast));
+		zassert_ok(stepper_ctrl_move_to(m->dev, 1500));
+		k_msleep(60);
+		zassert_ok(stepper_ctrl_move_to(m->dev, -500));
+		wait_for(m, STEPPER_CTRL_EVENT_STEPS_COMPLETED);
+
+		zassert_equal(position(m), -500);
+		zassert_equal(check_dir_timing(m, dir_level, -500), 1, "%s dithers", m->dev->name);
+		check_pulses(m);
+	}
+}
+
+ZTEST(zstep_timing, test_shaped_stop_lets_motion_settle)
+{
+	struct zstep_shaper s = shaper_of(ZSTEP_SHAPER_EI);
+	uint32_t stop_at = 0;
+
+	zassert_ok(stepper_ctrl_configure_ramp(e->dev, &fast));
+	zassert_ok(stepper_ctrl_run(e->dev, STEPPER_CTRL_DIRECTION_POSITIVE));
+	k_msleep(300);
+	zassert_ok(counter_get_value(counter, &stop_at));
+	zassert_ok(stepper_ctrl_stop(e->dev));
+	wait_for(e, STEPPER_CTRL_EVENT_STOPPED);
+
+	size_t n = step_ticks(e, got[4]);
+
+	zassert_equal(position(e), n);
+	zassert_true(got[4][n - 1] - stop_at > s.delay[s.impulses - 1],
+		     "the shaped motion ended before the shaper settled");
+}
+
+ZTEST(zstep_timing, test_shaped_halt_without_ramp)
+{
+	const struct stepper_ctrl_ramp constant = {.speed_max = 2000};
+
+	zassert_ok(stepper_ctrl_configure_ramp(d->dev, &constant));
+	zassert_ok(stepper_ctrl_run(d->dev, STEPPER_CTRL_DIRECTION_NEGATIVE));
+	k_msleep(50);
+	zassert_ok(stepper_ctrl_stop(d->dev));
+	zassert_ok(k_sem_take(&d->done, K_NO_WAIT), "halt reports STOPPED right away");
+	zassert_equal(d->event, STEPPER_CTRL_EVENT_STOPPED);
+
+	bool moving;
+
+	zassert_ok(stepper_ctrl_is_moving(d->dev, &moving));
+	zassert_false(moving);
+	zassert_equal(position(d), -(int32_t)step_ticks(d, got[3]));
+}
+
+ZTEST(zstep_timing, test_set_input_shaper)
+{
+	struct stepper_ctrl_ramp too_fast = fast;
+
+	zassert_equal(zstep_set_input_shaper(a->dev, ZSTEP_SHAPER_ZVD, 4000, 100), -ENOTSUP,
+		      "no shaper buffer");
+	zassert_ok(zstep_set_input_shaper(a->dev, ZSTEP_SHAPER_NONE, 0, 0));
+	zassert_equal(zstep_set_input_shaper(d->dev, ZSTEP_SHAPER_EI, 0, 100), -EINVAL);
+
+	zassert_ok(stepper_ctrl_configure_ramp(d->dev, &fast));
+	zassert_equal(zstep_set_input_shaper(d->dev, ZSTEP_SHAPER_EI, 1000, 100), -EINVAL,
+		      "10 Hz EI does not fit the buffer at full speed");
+	zassert_ok(zstep_set_input_shaper(d->dev, ZSTEP_SHAPER_EI, 4000, 100));
+
+	too_fast.speed_max = 60000;
+	zassert_equal(stepper_ctrl_configure_ramp(d->dev, &too_fast), -EINVAL);
+
+	zassert_ok(stepper_ctrl_run(d->dev, STEPPER_CTRL_DIRECTION_POSITIVE));
+	zassert_equal(zstep_set_input_shaper(d->dev, ZSTEP_SHAPER_ZVD, 4000, 100), -EBUSY);
+	zassert_ok(stepper_ctrl_stop(d->dev));
+	wait_for(d, STEPPER_CTRL_EVENT_STOPPED);
+
+	zassert_ok(zstep_set_input_shaper(d->dev, ZSTEP_SHAPER_ZVD, 4000, 100));
 }
 
 static void *setup(void)

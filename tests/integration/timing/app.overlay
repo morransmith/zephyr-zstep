@@ -7,7 +7,7 @@
 		compatible = "zstep,test-gpio-spy";
 		gpio-controller;
 		#gpio-cells = <2>;
-		ngpios = <8>;
+		ngpios = <10>;
 	};
 
 	motor_a: motor-a {
@@ -34,5 +34,27 @@
 		counter = <&counter0>;
 		counter-channel = <2>;
 		dual-edge-step;
+	};
+
+	motor_d: motor-d {
+		compatible = "zstep,step-dir";
+		step-gpios = <&spy 6 GPIO_ACTIVE_HIGH>;
+		dir-gpios = <&spy 7 GPIO_ACTIVE_HIGH>;
+		counter = <&counter0>;
+		counter-channel = <3>;
+		input-shaper = "zvd";
+		input-shaper-frequency-centihz = <4000>;
+		input-shaper-buffer-steps = <1024>;
+	};
+
+	motor_e: motor-e {
+		compatible = "zstep,step-dir";
+		step-gpios = <&spy 8 GPIO_ACTIVE_HIGH>;
+		dir-gpios = <&spy 9 GPIO_ACTIVE_HIGH>;
+		counter = <&counter0>;
+		counter-channel = <4>;
+		input-shaper = "ei";
+		input-shaper-frequency-centihz = <4000>;
+		input-shaper-buffer-steps = <1024>;
 	};
 };

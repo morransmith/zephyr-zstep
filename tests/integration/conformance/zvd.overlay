@@ -1,0 +1,7 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+
+&motor {
+	input-shaper = "zvd";
+	input-shaper-frequency-centihz = <4000>;
+	input-shaper-buffer-steps = <64>;
+};

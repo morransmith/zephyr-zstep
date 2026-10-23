@@ -18,3 +18,13 @@ tests:
     extra_configs:
       - CONFIG_COUNTER_NATIVE_SIM_FREQUENCY=1000000
       - CONFIG_STEPPER_CTRL_ISR_SAFE_EVENTS=n
+  zstep.integration.conformance.zvd:
+    extra_args:
+      - EXTRA_DTC_OVERLAY_FILE="zvd.overlay"
+    extra_configs:
+      - CONFIG_COUNTER_NATIVE_SIM_FREQUENCY=1000000
+  zstep.integration.conformance.ei:
+    extra_args:
+      - EXTRA_DTC_OVERLAY_FILE="ei.overlay"
+    extra_configs:
+      - CONFIG_COUNTER_NATIVE_SIM_FREQUENCY=1000000
