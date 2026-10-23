@@ -1,0 +1,39 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+
+/*
+ * Arduino CNC shield v3 wiring, all three axes share TIMER3.
+ */
+
+#include <zephyr/dt-bindings/gpio/gpio.h>
+
+&timer3 {
+	status = "okay";
+	/* 16 MHz / 2^4 = 1 MHz */
+	prescaler = <4>;
+};
+
+/ {
+	x_axis: x-axis {
+		compatible = "zstep,step-dir";
+		step-gpios = <&arduino_header 8 GPIO_ACTIVE_HIGH>;	/* D2 */
+		dir-gpios = <&arduino_header 11 GPIO_ACTIVE_HIGH>;	/* D5 */
+		counter = <&timer3>;
+		counter-channel = <0>;
+	};
+
+	y_axis: y-axis {
+		compatible = "zstep,step-dir";
+		step-gpios = <&arduino_header 9 GPIO_ACTIVE_HIGH>;	/* D3 */
+		dir-gpios = <&arduino_header 12 GPIO_ACTIVE_HIGH>;	/* D6 */
+		counter = <&timer3>;
+		counter-channel = <1>;
+	};
+
+	z_axis: z-axis {
+		compatible = "zstep,step-dir";
+		step-gpios = <&arduino_header 10 GPIO_ACTIVE_HIGH>;	/* D4 */
+		dir-gpios = <&arduino_header 13 GPIO_ACTIVE_HIGH>;	/* D7 */
+		counter = <&timer3>;
+		counter-channel = <2>;
+	};
+};

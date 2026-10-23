@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: Apache-2.0
+
+common:
+  tags:
+    - drivers
+    - stepper
+  platform_allow:
+    - native_sim
+    - native_sim/native/64
+  integration_platforms:
+    - native_sim/native/64
+tests:
+  zstep.integration.conformance.counter_1khz: {}
+  zstep.integration.conformance.counter_1mhz:
+    extra_configs:
+      - CONFIG_COUNTER_NATIVE_SIM_FREQUENCY=1000000
+  zstep.integration.conformance.direct_events:
+    extra_configs:
+      - CONFIG_COUNTER_NATIVE_SIM_FREQUENCY=1000000
+      - CONFIG_STEPPER_CTRL_ISR_SAFE_EVENTS=n
+  zstep.integration.conformance.zvd:
+    extra_args:
+      - EXTRA_DTC_OVERLAY_FILE="zvd.overlay"
+    extra_configs:
+      - CONFIG_COUNTER_NATIVE_SIM_FREQUENCY=1000000
+  zstep.integration.conformance.ei:
+    extra_args:
+      - EXTRA_DTC_OVERLAY_FILE="ei.overlay"
+    extra_configs:
+      - CONFIG_COUNTER_NATIVE_SIM_FREQUENCY=1000000

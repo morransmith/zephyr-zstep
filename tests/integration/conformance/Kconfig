@@ -1,0 +1,3 @@
+# SPDX-License-Identifier: Apache-2.0
+
+source "$(ZEPHYR_BASE)/tests/drivers/stepper/stepper_ctrl/Kconfig"

@@ -1,0 +1,17 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+
+/*
+ * Input shaping for the XY axes, as measured on a printer frame.
+ */
+
+&x_axis {
+	input-shaper = "ei";
+	input-shaper-frequency-centihz = <4000>;
+	input-shaper-buffer-steps = <256>;
+};
+
+&y_axis {
+	input-shaper = "zvd";
+	input-shaper-frequency-centihz = <5200>;
+	input-shaper-buffer-steps = <256>;
+};

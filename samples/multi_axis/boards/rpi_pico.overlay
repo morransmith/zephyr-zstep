@@ -1,0 +1,33 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+
+/*
+ * All three axes share the 1 MHz system timer, one alarm each.
+ */
+
+#include <zephyr/dt-bindings/gpio/gpio.h>
+
+/ {
+	x_axis: x-axis {
+		compatible = "zstep,step-dir";
+		step-gpios = <&gpio0 2 GPIO_ACTIVE_HIGH>;
+		dir-gpios = <&gpio0 3 GPIO_ACTIVE_HIGH>;
+		counter = <&timer>;
+		counter-channel = <0>;
+	};
+
+	y_axis: y-axis {
+		compatible = "zstep,step-dir";
+		step-gpios = <&gpio0 4 GPIO_ACTIVE_HIGH>;
+		dir-gpios = <&gpio0 5 GPIO_ACTIVE_HIGH>;
+		counter = <&timer>;
+		counter-channel = <1>;
+	};
+
+	z_axis: z-axis {
+		compatible = "zstep,step-dir";
+		step-gpios = <&gpio0 6 GPIO_ACTIVE_HIGH>;
+		dir-gpios = <&gpio0 7 GPIO_ACTIVE_HIGH>;
+		counter = <&timer>;
+		counter-channel = <2>;
+	};
+};
