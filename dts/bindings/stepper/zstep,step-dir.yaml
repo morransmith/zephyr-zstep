@@ -63,6 +63,32 @@ properties:
     description: |
       Minimum time between a direction change and the next step edge.
 
+  input-shaper:
+    type: string
+    enum:
+      - "none"
+      - "zv"
+      - "zvd"
+      - "ei"
+    description: |
+      Input shaper cancelling a resonance of the axis. ZVD suits an accurately measured
+      frequency, EI tolerates a larger error. Needs input-shaper-buffer-steps.
+
+  input-shaper-frequency-centihz:
+    type: int
+    description: Resonance frequency in 0.01 Hz, e.g. 4250 for 42.5 Hz.
+
+  input-shaper-damping-permille:
+    type: int
+    default: 100
+    description: Damping ratio of the resonance in 0.001 units, at most 300 for EI.
+
+  input-shaper-buffer-steps:
+    type: int
+    description: |
+      Commanded steps kept for the delayed impulses, 8 bytes each. It must cover the
+      shaper duration at full speed, e.g. 1100 for EI at 40 Hz and 40000 steps/s.
+
 examples:
   - |
     x_axis: x-axis {

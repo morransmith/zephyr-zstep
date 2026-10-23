@@ -50,6 +50,25 @@ enum zstep_shaper_type {
 	ZSTEP_SHAPER_EI,
 };
 
+/**
+ * @brief Select the input shaper that cancels a resonance of the axis.
+ *
+ * The physical motion follows the commanded one delayed by the shaper duration, so events
+ * and is_moving report the end of the physical motion.
+ *
+ * @param dev zstep,step-dir device with an input-shaper-buffer-steps property.
+ * @param type Shaper type, ZSTEP_SHAPER_NONE turns shaping off.
+ * @param freq_centihz Resonance frequency [0.01 Hz].
+ * @param damping_permille Damping ratio [0.001], 100 suits most machines, at most 300 for EI.
+ *
+ * @retval 0 Success.
+ * @retval -EINVAL Invalid parameters or the buffer is too short for the configured speed.
+ * @retval -ENOTSUP The device has no shaper buffer.
+ * @retval -EBUSY The motor is moving.
+ */
+int zstep_set_input_shaper(const struct device *dev, enum zstep_shaper_type type,
+			   uint32_t freq_centihz, uint32_t damping_permille);
+
 #ifdef __cplusplus
 }
 #endif

@@ -16,6 +16,7 @@
 #include <stepper_ctrl_event_handler.h>
 
 #include "zstep_ramp.h"
+#include "zstep_shaper.h"
 
 LOG_MODULE_REGISTER(zstep_step_dir, CONFIG_STEPPER_LOG_LEVEL);
 
@@ -39,25 +40,42 @@ struct zstep_config {
 	const struct device *counter;
 	uint32_t step_width_ns;
 	uint32_t dir_setup_ns;
+	uint32_t shaper_centihz;
+	uint32_t shaper_damping;
+	enum zstep_shaper_type shaper;
 	uint8_t channel;
 	bool invert_direction;
 	bool dual_edge;
+	bool shaper_buffer;
 };
 
+/*
+ * The commanded motion (ramp, target, cmd_pos, t) produces steps that the shaper replays
+ * with delays; the physical motion (pos, edge, phase) follows the shaped steps.
+ */
 struct zstep_data {
 	struct stepper_ctrl_event_handler_data event_common;
 	struct k_spinlock lock;
 	struct zstep_profile profile;
 	struct zstep_ramp ramp;
+	struct zstep_echo echo;
 	enum motion motion;
 	enum phase phase;
-	int32_t pos;
 	int32_t target;
+	int32_t cmd_pos;
+	int32_t pos;
 	int8_t dir;
 	int8_t run_dir;
+	int8_t step_dir;
+	int8_t pin_dir;
 	bool step_level;
-	/* Grid time of the current step, the alarm only approximates it. */
+	bool cmd_stepped;
+	int final_event;
+	int pending_event;
+	/* Grid times of the next commanded and physical step, alarms only approximate them. */
 	uint32_t t;
+	uint32_t edge;
+	uint32_t last_edge;
 	uint32_t due;
 	uint32_t freq;
 	uint32_t top;
@@ -92,11 +110,16 @@ static uint32_t counter_now(const struct device *dev)
 	return data->count_up ? ticks : data->top - ticks;
 }
 
+static bool is_shaping(const struct zstep_data *data)
+{
+	return data->echo.shaper.impulses > 1;
+}
+
 static int8_t wanted_dir(const struct zstep_data *data)
 {
 	switch (data->motion) {
 	case MOTION_POSITION:
-		return (data->target > data->pos) - (data->target < data->pos);
+		return (data->target > data->cmd_pos) - (data->target < data->cmd_pos);
 	case MOTION_VELOCITY:
 		return data->run_dir;
 	default:
@@ -114,19 +137,19 @@ static uint32_t steps_ahead(const struct zstep_data *data)
 		return UINT32_MAX;
 	}
 
-	return llabs((int64_t)data->target - data->pos);
+	return llabs((int64_t)data->target - data->cmd_pos);
 }
 
-static void set_dir_locked(const struct device *dev, int8_t dir)
+static void set_dir_pin_locked(const struct device *dev, int8_t dir)
 {
 	const struct zstep_config *cfg = dev->config;
 	struct zstep_data *data = dev->data;
 
-	data->dir = dir;
+	data->pin_dir = dir;
 	(void)gpio_pin_set_dt(&cfg->dir, (dir > 0) != cfg->invert_direction);
 }
 
-static void set_step_locked(const struct device *dev, bool level)
+static void set_step_pin_locked(const struct device *dev, bool level)
 {
 	const struct zstep_config *cfg = dev->config;
 	struct zstep_data *data = dev->data;
@@ -149,7 +172,7 @@ static int arm_locked(const struct device *dev)
 {
 	const struct zstep_config *cfg = dev->config;
 	struct zstep_data *data = dev->data;
-	uint32_t at = data->phase == PHASE_STEP ? data->t : data->t + data->min_delay;
+	uint32_t at = data->phase == PHASE_STEP ? data->edge : data->last_edge + data->min_delay;
 	struct counter_alarm_cfg alarm = {
 		.callback = zstep_alarm,
 		.user_data = (void *)dev,
@@ -190,48 +213,87 @@ static int abort_locked(const struct device *dev, int err)
 	const struct zstep_config *cfg = dev->config;
 	struct zstep_data *data = dev->data;
 
-	LOG_ERR("%s: cannot arm counter alarm (%d)", dev->name, err);
+	LOG_ERR("%s: motion aborted (%d)", dev->name, err);
 	if (!cfg->dual_edge) {
-		set_step_locked(dev, false);
+		set_step_pin_locked(dev, false);
 	}
 
 	data->motion = MOTION_IDLE;
 	return STEPPER_CTRL_EVENT_STOPPED;
 }
 
-static int rest_locked(const struct device *dev)
+/* Hands the next commanded step to the shaper, or closes it once the command has ended. */
+static int command_locked(struct zstep_data *data)
+{
+	bool at_rest = !data->cmd_stepped;
+
+	if (data->cmd_stepped) {
+		uint32_t interval = zstep_ramp_next(&data->ramp, steps_ahead(data));
+
+		at_rest = interval == 0;
+		data->t += at_rest ? zstep_ramp_pause(&data->ramp.p) : interval;
+		data->t &= data->top;
+		data->cmd_stepped = false;
+	}
+
+	if (at_rest) {
+		int8_t dir = wanted_dir(data);
+
+		if (dir == 0) {
+			data->final_event = data->motion == MOTION_POSITION
+						    ? STEPPER_CTRL_EVENT_STEPS_COMPLETED
+						    : STEPPER_CTRL_EVENT_STOPPED;
+			data->echo.closed = true;
+			return 0;
+		}
+
+		data->dir = dir;
+	}
+
+	data->cmd_pos += data->dir;
+	data->cmd_stepped = true;
+	return zstep_echo_push(&data->echo, data->t, data->dir);
+}
+
+/* Plans the next physical step, returns an event once the motion has ended. */
+static int plan_locked(const struct device *dev)
 {
 	struct zstep_data *data = dev->data;
-	int8_t dir = wanted_dir(data);
 
-	if (dir == 0) {
-		int event = data->motion == MOTION_POSITION ? STEPPER_CTRL_EVENT_STEPS_COMPLETED
-							    : STEPPER_CTRL_EVENT_STOPPED;
+	for (;;) {
+		int err;
 
+		switch (zstep_echo_next(&data->echo, &data->edge, &data->step_dir)) {
+		case ZSTEP_ECHO_STEP:
+			return NO_EVENT;
+		case ZSTEP_ECHO_NEED_COMMAND:
+			err = command_locked(data);
+			if (err != 0) {
+				return abort_locked(dev, err);
+			}
+			break;
+		case ZSTEP_ECHO_DONE:
+			return data->final_event;
+		}
+	}
+}
+
+/* Acts on a planned step or end of motion, the DIR pin only changes here. */
+static int apply_locked(const struct device *dev, int event)
+{
+	struct zstep_data *data = dev->data;
+
+	if (event != NO_EVENT) {
 		data->motion = MOTION_IDLE;
 		return event;
 	}
 
-	if (dir != data->dir) {
-		set_dir_locked(dev, dir);
+	if (data->step_dir != data->pin_dir) {
+		set_dir_pin_locked(dev, data->step_dir);
 	}
 
-	data->t = (data->t + zstep_ramp_pause(&data->ramp.p)) & data->top;
 	data->phase = PHASE_STEP;
 	return NO_EVENT;
-}
-
-static bool plan_locked(struct zstep_data *data)
-{
-	uint32_t interval = zstep_ramp_next(&data->ramp, steps_ahead(data));
-
-	if (interval == 0) {
-		return false;
-	}
-
-	data->t = (data->t + interval) & data->top;
-	data->phase = PHASE_STEP;
-	return true;
 }
 
 static int step_locked(const struct device *dev)
@@ -239,17 +301,18 @@ static int step_locked(const struct device *dev)
 	const struct zstep_config *cfg = dev->config;
 	struct zstep_data *data = dev->data;
 
-	if (zstep_ramp_can_stop(&data->ramp) && wanted_dir(data) != data->dir) {
-		return rest_locked(dev);
+	data->pos += data->step_dir;
+	data->last_edge = data->edge;
+	set_step_pin_locked(dev, !data->step_level);
+	data->phase = PHASE_PULSE_END;
+	if (!cfg->dual_edge) {
+		return NO_EVENT;
 	}
 
-	data->pos += data->dir;
-	set_step_locked(dev, !data->step_level);
-	data->phase = PHASE_PULSE_END;
-
 	/* Without a falling edge the next step is planned now, PULSE_END then only holds DIR. */
-	if (cfg->dual_edge) {
-		(void)plan_locked(data);
+	data->pending_event = plan_locked(dev);
+	if (data->pending_event == NO_EVENT && data->step_dir == data->pin_dir) {
+		data->phase = PHASE_STEP;
 	}
 
 	return NO_EVENT;
@@ -260,12 +323,12 @@ static int pulse_end_locked(const struct device *dev)
 	const struct zstep_config *cfg = dev->config;
 	struct zstep_data *data = dev->data;
 
-	if (cfg->dual_edge) {
-		return rest_locked(dev);
+	if (!cfg->dual_edge) {
+		set_step_pin_locked(dev, false);
+		data->pending_event = plan_locked(dev);
 	}
 
-	set_step_locked(dev, false);
-	return plan_locked(data) ? NO_EVENT : rest_locked(dev);
+	return apply_locked(dev, data->pending_event);
 }
 
 static int run_phase_locked(const struct device *dev)
@@ -325,10 +388,27 @@ static int start_locked(const struct device *dev, uint32_t at)
 {
 	struct zstep_data *data = dev->data;
 
-	set_dir_locked(dev, wanted_dir(data));
 	data->t = at & data->top;
-	data->phase = PHASE_STEP;
-	return schedule_locked(dev);
+	data->cmd_pos = data->pos;
+	data->cmd_stepped = false;
+	zstep_echo_reset(&data->echo, data->t);
+
+	int event = apply_locked(dev, plan_locked(dev));
+
+	return data->motion == MOTION_IDLE ? event : schedule_locked(dev);
+}
+
+/* Lets a command that ended while the shaped motion still runs continue with a new goal. */
+static void reopen_locked(const struct device *dev)
+{
+	struct zstep_data *data = dev->data;
+	uint32_t soon = (counter_now(dev) + data->min_delay) & data->top;
+
+	if (((soon - data->t) & data->top) <= data->max_delay) {
+		data->t = soon;
+	}
+
+	data->echo.closed = false;
 }
 
 static int move_locked(const struct device *dev, enum motion motion, int32_t target, int8_t run_dir,
@@ -345,9 +425,13 @@ static int move_locked(const struct device *dev, enum motion motion, int32_t tar
 	data->target = target;
 	data->run_dir = run_dir;
 	if (!idle) {
+		if (data->echo.closed) {
+			reopen_locked(dev);
+		}
 		return 0;
 	}
 
+	data->cmd_pos = data->pos;
 	if (wanted_dir(data) == 0) {
 		data->motion = MOTION_IDLE;
 		*event = STEPPER_CTRL_EVENT_STEPS_COMPLETED;
@@ -404,13 +488,25 @@ static int zstep_run(const struct device *dev, const enum stepper_ctrl_direction
 static int stop_locked(const struct device *dev)
 {
 	struct zstep_data *data = dev->data;
+	bool no_ramp = data->ramp.p.c0 == 0;
+	bool resting = zstep_ramp_can_stop(&data->ramp) && !is_shaping(data);
 
 	if (data->motion == MOTION_IDLE) {
 		return STEPPER_CTRL_EVENT_STOPPED;
 	}
 
 	data->motion = MOTION_STOPPING;
-	if (data->phase == PHASE_PULSE_END || !zstep_ramp_can_stop(&data->ramp)) {
+	if (!no_ramp && !resting) {
+		return NO_EVENT;
+	}
+
+	/* Halt: drop the steps still in flight, a running pulse completes first. */
+	zstep_echo_reset(&data->echo, data->edge);
+	data->echo.closed = true;
+	data->final_event = STEPPER_CTRL_EVENT_STOPPED;
+	data->pending_event = STEPPER_CTRL_EVENT_STOPPED;
+	data->cmd_pos = data->pos;
+	if (data->phase == PHASE_PULSE_END) {
 		return NO_EVENT;
 	}
 
@@ -446,7 +542,10 @@ static int zstep_set_reference_position(const struct device *dev, const int32_t 
 	struct zstep_data *data = dev->data;
 
 	K_SPINLOCK(&data->lock) {
-		data->target = value + ((int64_t)data->target - data->pos);
+		int64_t shift = (int64_t)value - data->pos;
+
+		data->target += shift;
+		data->cmd_pos += shift;
 		data->pos = value;
 	}
 
@@ -464,24 +563,33 @@ static int zstep_get_actual_position(const struct device *dev, int32_t *value)
 	return 0;
 }
 
-static int make_profile(const struct device *dev, struct zstep_profile *p, uint64_t cmin,
-			uint32_t accel, uint32_t decel)
+static int check_profile(const struct device *dev, const struct zstep_profile *p,
+			 const struct zstep_shaper *shaper)
 {
 	const struct zstep_config *cfg = dev->config;
 	const struct zstep_data *data = dev->data;
 	uint64_t shortest = (uint64_t)(cfg->dual_edge ? 1 : 2) * data->min_delay << ZSTEP_RAMP_Q;
 	uint64_t longest = (uint64_t)data->max_delay << ZSTEP_RAMP_Q;
-	int err = zstep_profile_init(p, data->freq, cmin, accel, decel);
-
-	if (err != 0) {
-		return err;
-	}
 
 	if (p->cmin < shortest || MAX(MAX(p->c0, p->c0d), p->cmin) > longest) {
 		return -EINVAL;
 	}
 
+	if (shaper->impulses > 1 && !zstep_shaper_fits(shaper, p->cmin, data->echo.size)) {
+		LOG_ERR("%s: input-shaper-buffer-steps too small for this speed", dev->name);
+		return -EINVAL;
+	}
+
 	return 0;
+}
+
+static int make_profile(const struct device *dev, struct zstep_profile *p, uint64_t cmin,
+			uint32_t accel, uint32_t decel)
+{
+	struct zstep_data *data = dev->data;
+	int err = zstep_profile_init(p, data->freq, cmin, accel, decel);
+
+	return err != 0 ? err : check_profile(dev, p, &data->echo.shaper);
 }
 
 static int zstep_set_microstep_interval(const struct device *dev, const uint64_t interval_ns)
@@ -553,6 +661,42 @@ static DEVICE_API(stepper_ctrl, zstep_api) = {
 	.stop = zstep_stop,
 	.is_moving = zstep_is_moving,
 };
+
+int zstep_set_input_shaper(const struct device *dev, enum zstep_shaper_type type,
+			   uint32_t freq_centihz, uint32_t damping_permille)
+{
+	const struct zstep_config *cfg = dev->config;
+	struct zstep_data *data = dev->data;
+	struct zstep_shaper shaper;
+	int err;
+
+	if (dev->api != &zstep_api || (type != ZSTEP_SHAPER_NONE && !cfg->shaper_buffer)) {
+		return -ENOTSUP;
+	}
+
+	err = zstep_shaper_init(&shaper, type, freq_centihz, damping_permille, data->freq);
+	if (err != 0) {
+		return err;
+	}
+
+	K_SPINLOCK(&data->lock) {
+		if (data->motion != MOTION_IDLE) {
+			err = -EBUSY;
+			K_SPINLOCK_BREAK;
+		}
+
+		if (data->profile.cmin != 0) {
+			err = check_profile(dev, &data->profile, &shaper);
+			if (err != 0) {
+				K_SPINLOCK_BREAK;
+			}
+		}
+
+		data->echo.shaper = shaper;
+	}
+
+	return err;
+}
 
 static int check_group(const struct device *const devs[], const int32_t steps[], size_t count)
 {
@@ -680,6 +824,10 @@ int zstep_group_move_by(const struct device *const devs[], const int32_t steps[]
 	return 0;
 }
 
+/* Non-zero if any motor gets a shaper from devicetree, so libm is only linked when needed. */
+#define ZSTEP_DT_SHAPER(inst) DT_INST_ENUM_IDX_OR(inst, input_shaper, 0) +
+#define ZSTEP_ANY_DT_SHAPER   (DT_INST_FOREACH_STATUS_OKAY(ZSTEP_DT_SHAPER) 0)
+
 static int zstep_init(const struct device *dev)
 {
 	const struct zstep_config *cfg = dev->config;
@@ -709,6 +857,16 @@ static int zstep_init(const struct device *dev)
 	/* One extra tick covers the unknown counter phase at the moment an alarm is set. */
 	data->min_delay = DIV_ROUND_UP(hold_ns * data->freq, NSEC_PER_SEC) + 1;
 	data->max_delay = data->top >> 1;
+	data->echo.top = data->top;
+	data->echo.shaper = (struct zstep_shaper){.impulses = 1, .weight = {ZSTEP_SHAPER_UNIT}};
+
+	if (ZSTEP_ANY_DT_SHAPER && cfg->shaper != ZSTEP_SHAPER_NONE) {
+		err = zstep_shaper_init(&data->echo.shaper, cfg->shaper, cfg->shaper_centihz,
+					cfg->shaper_damping, data->freq);
+		if (err != 0) {
+			return err;
+		}
+	}
 
 	err = gpio_pin_configure_dt(&cfg->step, GPIO_OUTPUT_INACTIVE);
 	if (err != 0) {
@@ -734,20 +892,37 @@ static int zstep_init(const struct device *dev)
 				DT_INST_PROP(inst, prop))),                                        \
 		    (DT_INST_PROP(inst, prop)))
 
+/* The single impulse used without shaping needs room for one step in flight. */
+#define ZSTEP_BUFFER_STEPS(inst) MAX(2, DT_INST_PROP_OR(inst, input_shaper_buffer_steps, 0))
+
 #define ZSTEP_DEFINE(inst)                                                                         \
+	BUILD_ASSERT(DT_INST_ENUM_IDX_OR(inst, input_shaper, 0) == 0 ||                            \
+			     (DT_INST_NODE_HAS_PROP(inst, input_shaper_buffer_steps) &&            \
+			      DT_INST_NODE_HAS_PROP(inst, input_shaper_frequency_centihz)),        \
+		     "input-shaper needs input-shaper-buffer-steps and a frequency");              \
+	static struct zstep_echo_step zstep_buffer_##inst[ZSTEP_BUFFER_STEPS(inst)];               \
 	static const struct zstep_config zstep_config_##inst = {                                   \
 		.step = GPIO_DT_SPEC_INST_GET(inst, step_gpios),                                   \
 		.dir = GPIO_DT_SPEC_INST_GET(inst, dir_gpios),                                     \
 		.counter = DEVICE_DT_GET(DT_INST_PHANDLE(inst, counter)),                          \
 		.step_width_ns = ZSTEP_TIMING(inst, step_width_ns),                                \
 		.dir_setup_ns = DT_INST_PROP(inst, dir_setup_ns),                                  \
+		.shaper_centihz = DT_INST_PROP_OR(inst, input_shaper_frequency_centihz, 0),        \
+		.shaper_damping = DT_INST_PROP(inst, input_shaper_damping_permille),               \
+		.shaper = DT_INST_ENUM_IDX_OR(inst, input_shaper, 0),                              \
 		.channel = DT_INST_PROP(inst, counter_channel),                                    \
 		.invert_direction = DT_INST_PROP(inst, invert_direction),                          \
 		.dual_edge =                                                                       \
 			DT_INST_PROP(inst, dual_edge_step) || ZSTEP_TIMING(inst, dual_edge_step),  \
+		.shaper_buffer = DT_INST_NODE_HAS_PROP(inst, input_shaper_buffer_steps),           \
 	};                                                                                         \
 	static struct zstep_data zstep_data_##inst = {                                             \
 		.event_common = STEPPER_CTRL_EVENT_HANDLER_DT_INST_DATA_INIT(inst),                \
+		.echo =                                                                            \
+			{                                                                          \
+				.buf = zstep_buffer_##inst,                                        \
+				.size = ARRAY_SIZE(zstep_buffer_##inst),                           \
+			},                                                                         \
 		.dir = 1,                                                                          \
 	};                                                                                         \
 	DEVICE_DT_INST_DEFINE(inst, zstep_init, NULL, &zstep_data_##inst, &zstep_config_##inst,    \
