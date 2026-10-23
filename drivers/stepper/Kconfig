@@ -4,3 +4,31 @@ config ZSTEP_RAMP
 	bool
 	help
 	  Integer trapezoidal ramp generator used by the zstep drivers.
+
+config ZSTEP_STEP_DIR
+	bool "Ramped step/dir stepper motion controller"
+	default y
+	depends on STEPPER && DT_HAS_ZSTEP_STEP_DIR_ENABLED
+	select COUNTER
+	select GPIO
+	select STEPPER_CTRL_EVENT_HANDLER
+	select ZSTEP_RAMP
+	help
+	  Step/dir motion controller with acceleration ramps. Each motor uses its own
+	  channel of a shared hardware counter, so motors never disturb each other's timing.
+
+if ZSTEP_STEP_DIR
+
+config ZSTEP_GROUP_MAX_AXES
+	int "Maximum number of axes in a synchronized group move"
+	default 6
+	range 1 32
+
+config ZSTEP_GROUP_START_US
+	int "Delay before the first step of a synchronized group move [us]"
+	default 50
+	help
+	  Every axis of the group is armed for the same counter tick this far in the future.
+	  It must cover the time needed to arm all axes.
+
+endif # ZSTEP_STEP_DIR

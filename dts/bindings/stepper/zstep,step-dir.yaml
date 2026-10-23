@@ -1,0 +1,75 @@
+# SPDX-License-Identifier: Apache-2.0
+
+description: |
+  Step/dir stepper motion controller with trapezoidal acceleration ramps.
+
+  Every edge is scheduled by a hardware counter alarm, so no CPU time is spent
+  waiting. Several motors may share one counter, each using its own channel; their
+  timing stays independent because every motor keeps its own time grid.
+
+  The counter must be free running, count over a power-of-two range and allow
+  re-arming a channel from its own alarm callback.
+
+compatible: "zstep,step-dir"
+
+include:
+  - name: step-dir-timing.yaml
+
+properties:
+  step-gpios:
+    type: phandle-array
+    required: true
+    description: Step signal output.
+
+  dir-gpios:
+    type: phandle-array
+    required: true
+    description: |
+      Direction signal output. Driven active for the positive direction.
+
+  invert-direction:
+    type: boolean
+    description: Swap the positive and negative directions.
+
+  counter:
+    type: phandle
+    required: true
+    description: Hardware counter providing the time base.
+
+  counter-channel:
+    type: int
+    default: 0
+    description: |
+      Alarm channel of the counter used by this motor. Motors sharing a counter
+      must use different channels.
+
+  stepper-driver:
+    type: phandle
+    description: |
+      Optional stepper driver chip. Its step-width-ns and dual-edge-step properties
+      take precedence over the ones of this node.
+
+  step-width-ns:
+    default: 2000
+
+  dual-edge-step:
+    type: boolean
+    description: |
+      The driver steps on both edges of the step signal, halving the interrupt rate.
+
+  dir-setup-ns:
+    type: int
+    default: 650
+    description: |
+      Minimum time between a direction change and the next step edge.
+
+examples:
+  - |
+    x_axis: x-axis {
+        compatible = "zstep,step-dir";
+        step-gpios = <&gpioa 0 GPIO_ACTIVE_HIGH>;
+        dir-gpios = <&gpioa 1 GPIO_ACTIVE_HIGH>;
+        counter = <&counter2>;
+        counter-channel = <0>;
+        stepper-driver = <&x_driver>;
+    };
