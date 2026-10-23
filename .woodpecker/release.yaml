@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: Apache-2.0
+
+when:
+  - event: push
+    branch: master
+
+depends_on: [build]
+
+# svu needs the full history and the tags.
+clone:
+  git:
+    image: woodpeckerci/plugin-git
+    settings:
+      partial: false
+      tags: true
+      depth: 0
+
+steps:
+  - name: release
+    image: ghcr.io/caarlos0/svu:v3.2.4
+    environment:
+      GITEA_TOKEN:
+        from_secret: gitea_token
+    commands:
+      - ci/release.sh
