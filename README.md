@@ -140,6 +140,28 @@ zstep_group_move_by(axes, delta, ARRAY_SIZE(axes), &limits);
 
 `zstep_group_move_by()` requires all axes to be idle and to share one counter. The axis with the longest move follows `limits`, the others are slowed down in proportion. Every axis reports `STEPPER_CTRL_EVENT_STEPS_COMPLETED` itself.
 
+### Input shaping
+
+An input shaper cancels the resonance of the frame that a printer leaves as ringing on the part. ZV, ZVD and EI are available. EI reduces the vibration over the widest range of frequency error and works for damping ratios up to 0.3. ZVD has no damping limit.
+
+```dts
+&x_axis {
+	input-shaper = "ei";
+	input-shaper-frequency-centihz = <4000>;	/* 40.00 Hz */
+	input-shaper-damping-permille = <100>;		/* 0.1, the default */
+	input-shaper-buffer-steps = <1100>;
+};
+```
+
+The shaper can also be selected at run time, for example while calibrating: `zstep_set_input_shaper(dev, ZSTEP_SHAPER_ZVD, 5200, 100)`.
+
+- The physical motion lags the command by the shaper duration, one damped period for ZVD and EI (25 ms at 40 Hz). Events and `is_moving` report the end of the physical motion.
+- `input-shaper-buffer-steps` costs 8 bytes per step and must cover the shaper duration at the highest speed: about 1100 for EI at 40 Hz and 40000 steps/s. `stepper_ctrl_configure_ramp()` rejects speeds the buffer cannot hold.
+- Use 16 or more micro-steps. Coarser steps excite the resonance by themselves, and the driver logs a warning when its `stepper-driver` reports fewer. After changing the micro-step resolution, call `stepper_ctrl_configure_ramp()` again, since positions and speeds are in micro-steps.
+- Computing the shaper needs `expf` and `sqrtf` from a full C library.
+
+Measurements and the design are in [`doc/architecture.md`](doc/architecture.md#7-input-shaping).
+
 ### Kconfig
 
 | Option | Default | Meaning |
@@ -168,7 +190,8 @@ west flash
 | Acceleration ramps | Separate acceleration, deceleration and speed limits. Every move ends at rest on its target step. Target, direction and speed may change while the motor runs |
 | Independent motors | Motors on one counter use their own alarm channels. A motor never waits for another one, and interrupt latency caused by other motors does not accumulate into its timing |
 | Synchronized moves | `zstep_group_move_by()` starts several axes on the same counter tick and scales their profiles, so the tool moves along a straight line |
-| Run time cost | No busy waiting and no floating point. A step costs one 32-bit division and one counter interrupt, or two interrupts for single-edge drivers |
+| Input shaping | ZV, ZVD and EI cancel the resonance of the frame |
+| Run time cost | No busy waiting and no floating point in the step interrupt. A step costs one 32-bit division and one counter interrupt, or two interrupts for single-edge drivers |
 
 ### Not supported
 
@@ -186,7 +209,7 @@ west flash
 
 ## Samples
 
-`samples/multi_axis` traces a square with three synchronized axes, then moves them independently. It runs on `native_sim` and has overlays for `nucleo_f446re`, `nrf52840dk/nrf52840` and `rpi_pico`, with the Arduino CNC shield v3 pinout where the board has it.
+`samples/multi_axis` traces a square with three synchronized axes, then moves them independently. It runs on `native_sim` and has overlays for `nucleo_f446re`, `nrf52840dk/nrf52840` and `rpi_pico`, with the Arduino CNC shield v3 pinout where the board has it. `-DEXTRA_DTC_OVERLAY_FILE=shaped.overlay` shapes X with EI and Y with ZVD.
 
 ```sh
 west build -b native_sim/native/64 samples/multi_axis
