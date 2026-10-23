@@ -3,6 +3,15 @@
 #include <zephyr/dt-bindings/gpio/gpio.h>
 
 / {
+	fake_driver: fake-driver {
+		compatible = "zephyr,fake-stepper-driver";
+	};
+
+	/* Unused, the upstream fake driver does not build warning free without it. */
+	fake-ctrl {
+		compatible = "zephyr,fake-stepper-ctrl";
+	};
+
 	spy: gpio-spy {
 		compatible = "zstep,test-gpio-spy";
 		gpio-controller;
@@ -53,6 +62,7 @@
 		dir-gpios = <&spy 9 GPIO_ACTIVE_HIGH>;
 		counter = <&counter0>;
 		counter-channel = <4>;
+		stepper-driver = <&fake_driver>;
 		input-shaper = "ei";
 		input-shaper-frequency-centihz = <4000>;
 		input-shaper-buffer-steps = <1024>;

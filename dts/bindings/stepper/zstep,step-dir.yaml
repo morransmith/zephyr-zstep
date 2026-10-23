@@ -47,7 +47,8 @@ properties:
     type: phandle
     description: |
       Optional stepper driver chip. Its step-width-ns and dual-edge-step properties
-      take precedence over the ones of this node.
+      take precedence over the ones of this node, and its micro-step resolution is
+      checked when input shaping is used.
 
   step-width-ns:
     default: 2000

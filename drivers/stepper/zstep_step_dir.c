@@ -7,6 +7,7 @@
 #include <zephyr/device.h>
 #include <zephyr/drivers/counter.h>
 #include <zephyr/drivers/gpio.h>
+#include <zephyr/drivers/stepper/stepper.h>
 #include <zephyr/drivers/stepper/stepper_ctrl.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/spinlock.h>
@@ -21,6 +22,9 @@
 LOG_MODULE_REGISTER(zstep_step_dir, CONFIG_STEPPER_LOG_LEVEL);
 
 #define NO_EVENT -1
+
+/* Coarser steps excite the resonance by themselves, which no shaper can cancel. */
+#define SHAPER_MICRO_STEPS_MIN 16
 
 enum motion {
 	MOTION_IDLE,
@@ -38,6 +42,7 @@ struct zstep_config {
 	struct gpio_dt_spec step;
 	struct gpio_dt_spec dir;
 	const struct device *counter;
+	const struct device *stepper_driver;
 	uint32_t step_width_ns;
 	uint32_t dir_setup_ns;
 	uint32_t shaper_centihz;
@@ -563,6 +568,25 @@ static int zstep_get_actual_position(const struct device *dev, int32_t *value)
 	return 0;
 }
 
+static void check_micro_steps(const struct device *dev, const struct zstep_shaper *shaper)
+{
+	const struct zstep_config *cfg = dev->config;
+	enum stepper_micro_step_resolution res;
+
+	if (shaper->impulses == 1 || cfg->stepper_driver == NULL ||
+	    !device_is_ready(cfg->stepper_driver)) {
+		return;
+	}
+
+	if (stepper_get_micro_step_res(cfg->stepper_driver, &res) != 0 || res == 0 ||
+	    res >= SHAPER_MICRO_STEPS_MIN) {
+		return;
+	}
+
+	LOG_WRN("%s: input shaping needs %u or more micro-steps, the driver uses %u", dev->name,
+		SHAPER_MICRO_STEPS_MIN, res);
+}
+
 static int check_profile(const struct device *dev, const struct zstep_profile *p,
 			 const struct zstep_shaper *shaper)
 {
@@ -631,6 +655,7 @@ static int zstep_configure_ramp(const struct device *dev, const struct stepper_c
 		return err;
 	}
 
+	check_micro_steps(dev, &data->echo.shaper);
 	K_SPINLOCK(&data->lock) {
 		if (data->motion != MOTION_IDLE) {
 			err = -EBUSY;
@@ -678,6 +703,8 @@ int zstep_set_input_shaper(const struct device *dev, enum zstep_shaper_type type
 	if (err != 0) {
 		return err;
 	}
+
+	check_micro_steps(dev, &shaper);
 
 	K_SPINLOCK(&data->lock) {
 		if (data->motion != MOTION_IDLE) {
@@ -866,6 +893,8 @@ static int zstep_init(const struct device *dev)
 		if (err != 0) {
 			return err;
 		}
+
+		check_micro_steps(dev, &data->echo.shaper);
 	}
 
 	err = gpio_pin_configure_dt(&cfg->step, GPIO_OUTPUT_INACTIVE);
@@ -892,6 +921,10 @@ static int zstep_init(const struct device *dev)
 				DT_INST_PROP(inst, prop))),                                        \
 		    (DT_INST_PROP(inst, prop)))
 
+#define ZSTEP_DRIVER_DEV(inst)                                                                     \
+	COND_CODE_1(DT_INST_NODE_HAS_PROP(inst, stepper_driver),                                   \
+		    (DEVICE_DT_GET_OR_NULL(DT_INST_PHANDLE(inst, stepper_driver))), (NULL))
+
 /* The single impulse used without shaping needs room for one step in flight. */
 #define ZSTEP_BUFFER_STEPS(inst) MAX(2, DT_INST_PROP_OR(inst, input_shaper_buffer_steps, 0))
 
@@ -905,6 +938,7 @@ static int zstep_init(const struct device *dev)
 		.step = GPIO_DT_SPEC_INST_GET(inst, step_gpios),                                   \
 		.dir = GPIO_DT_SPEC_INST_GET(inst, dir_gpios),                                     \
 		.counter = DEVICE_DT_GET(DT_INST_PHANDLE(inst, counter)),                          \
+		.stepper_driver = ZSTEP_DRIVER_DEV(inst),                                          \
 		.step_width_ns = ZSTEP_TIMING(inst, step_width_ns),                                \
 		.dir_setup_ns = DT_INST_PROP(inst, dir_setup_ns),                                  \
 		.shaper_centihz = DT_INST_PROP_OR(inst, input_shaper_frequency_centihz, 0),        \

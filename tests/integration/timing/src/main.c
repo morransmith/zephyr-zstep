@@ -1,16 +1,22 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 
 #include <stdlib.h>
+#include <string.h>
 
 #include <zephyr/drivers/counter.h>
 #include <zephyr/drivers/gpio.h>
+#include <zephyr/drivers/stepper/stepper.h>
 #include <zephyr/drivers/stepper/stepper_ctrl.h>
+#include <zephyr/fff.h>
 #include <zephyr/ztest.h>
 #include <zstep/zstep.h>
 
 #include "gpio_spy.h"
+#include "log_capture.h"
 #include "zstep_ramp.h"
 #include "zstep_shaper.h"
+
+DEFINE_FFF_GLOBALS;
 
 #define FREQ      1000000U
 /* Default 2000 ns step width at 1 MHz rounded up, plus one tick of counter phase. */
@@ -579,6 +585,32 @@ ZTEST(zstep_timing, test_set_input_shaper)
 	wait_for(d, STEPPER_CTRL_EVENT_STOPPED);
 
 	zassert_ok(zstep_set_input_shaper(d->dev, ZSTEP_SHAPER_ZVD, 4000, 100));
+}
+
+ZTEST(zstep_timing, test_warns_about_coarse_micro_steps)
+{
+	const struct device *driver = DEVICE_DT_GET(DT_NODELABEL(fake_driver));
+	const char *warning = "input shaping needs 16 or more micro-steps";
+
+	zassert_ok(stepper_set_micro_step_res(driver, STEPPER_MICRO_STEP_8));
+	log_capture_reset();
+	zassert_ok(zstep_set_input_shaper(e->dev, ZSTEP_SHAPER_EI, 4000, 100));
+	zassert_not_null(strstr(log_capture_text(), warning), "selecting a shaper");
+
+	log_capture_reset();
+	zassert_ok(stepper_ctrl_configure_ramp(e->dev, &fast));
+	zassert_not_null(strstr(log_capture_text(), warning), "configuring the speed");
+
+	log_capture_reset();
+	zassert_ok(zstep_set_input_shaper(e->dev, ZSTEP_SHAPER_NONE, 0, 0));
+	zassert_ok(stepper_ctrl_configure_ramp(e->dev, &fast));
+	zassert_is_null(strstr(log_capture_text(), warning), "no shaper, no warning");
+
+	zassert_ok(stepper_set_micro_step_res(driver, STEPPER_MICRO_STEP_16));
+	log_capture_reset();
+	zassert_ok(zstep_set_input_shaper(e->dev, ZSTEP_SHAPER_EI, 4000, 100));
+	zassert_ok(stepper_ctrl_configure_ramp(e->dev, &fast));
+	zassert_is_null(strstr(log_capture_text(), warning), "16 micro-steps are enough");
 }
 
 static void *setup(void)
