@@ -1,0 +1,56 @@
+# SPDX-License-Identifier: Apache-2.0
+
+when:
+  - event: [push, pull_request, manual]
+
+# west init -l makes the parent of the repository the west topdir, so zephyr
+# and the modules are cloned into the workspace volume shared by all steps.
+workspace:
+  base: /woodpecker
+  path: zephyr-zstep
+
+variables:
+  - &image ghcr.io/zephyrproject-rtos/ci-repo-cache:v0.29.1.20260327
+
+steps:
+  - name: west
+    image: *image
+    commands:
+      - west init -l .
+      - west update --path-cache /repo-cache/zephyrproject
+
+  # Doxygen 1.16.1 of the Zephyr CI image
+  - name: docs
+    image: *image
+    depends_on: []
+    commands:
+      - doxygen doc/Doxyfile
+
+  - name: native_sim
+    image: *image
+    depends_on: [west]
+    commands:
+      - >-
+        west twister -T tests -T samples -O twister-out-native --inline-logs
+        -p native_sim
+        -p native_sim/native/64
+
+  # The workspace of west.yml has no HALs. The sample boards get theirs in a
+  # second workspace with the manifest of the same Zephyr. west init does not
+  # run inside a workspace, so the second one is in /tmp.
+  - name: hardware
+    image: *image
+    depends_on: [west]
+    commands:
+      - cd /tmp
+      - west init -m /woodpecker/zephyr --mr v4.4.2 hardware
+      - cd hardware
+      - >-
+        west update --path-cache /repo-cache/zephyrproject
+        cmsis cmsis_6 hal_nordic hal_rpi_pico hal_stm32
+      - >-
+        west twister -T $CI_WORKSPACE/samples --build-only -O $CI_WORKSPACE/twister-out-hw
+        --inline-logs -x ZEPHYR_EXTRA_MODULES=$CI_WORKSPACE
+        -p nucleo_f446re
+        -p nrf52840dk/nrf52840
+        -p rpi_pico
