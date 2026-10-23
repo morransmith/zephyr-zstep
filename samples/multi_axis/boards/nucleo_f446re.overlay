@@ -1,0 +1,43 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+
+/*
+ * Arduino CNC shield v3 wiring, all three axes share the 32-bit TIM5.
+ */
+
+#include <zephyr/dt-bindings/gpio/gpio.h>
+
+&timers5 {
+	status = "okay";
+	/* 96 MHz timer clock / 96 = 1 MHz */
+	st,prescaler = <95>;
+
+	tim5_counter: counter {
+		status = "okay";
+	};
+};
+
+/ {
+	x_axis: x-axis {
+		compatible = "zstep,step-dir";
+		step-gpios = <&arduino_header 8 GPIO_ACTIVE_HIGH>;	/* D2 */
+		dir-gpios = <&arduino_header 11 GPIO_ACTIVE_HIGH>;	/* D5 */
+		counter = <&tim5_counter>;
+		counter-channel = <0>;
+	};
+
+	y_axis: y-axis {
+		compatible = "zstep,step-dir";
+		step-gpios = <&arduino_header 9 GPIO_ACTIVE_HIGH>;	/* D3 */
+		dir-gpios = <&arduino_header 12 GPIO_ACTIVE_HIGH>;	/* D6 */
+		counter = <&tim5_counter>;
+		counter-channel = <1>;
+	};
+
+	z_axis: z-axis {
+		compatible = "zstep,step-dir";
+		step-gpios = <&arduino_header 10 GPIO_ACTIVE_HIGH>;	/* D4 */
+		dir-gpios = <&arduino_header 13 GPIO_ACTIVE_HIGH>;	/* D7 */
+		counter = <&tim5_counter>;
+		counter-channel = <2>;
+	};
+};

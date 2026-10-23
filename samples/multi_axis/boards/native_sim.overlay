@@ -1,0 +1,29 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+
+#include <zephyr/dt-bindings/gpio/gpio.h>
+
+/ {
+	x_axis: x-axis {
+		compatible = "zstep,step-dir";
+		step-gpios = <&gpio0 0 GPIO_ACTIVE_HIGH>;
+		dir-gpios = <&gpio0 1 GPIO_ACTIVE_HIGH>;
+		counter = <&counter0>;
+		counter-channel = <0>;
+	};
+
+	y_axis: y-axis {
+		compatible = "zstep,step-dir";
+		step-gpios = <&gpio0 2 GPIO_ACTIVE_HIGH>;
+		dir-gpios = <&gpio0 3 GPIO_ACTIVE_HIGH>;
+		counter = <&counter0>;
+		counter-channel = <1>;
+	};
+
+	z_axis: z-axis {
+		compatible = "zstep,step-dir";
+		step-gpios = <&gpio0 4 GPIO_ACTIVE_HIGH>;
+		dir-gpios = <&gpio0 5 GPIO_ACTIVE_HIGH>;
+		counter = <&counter0>;
+		counter-channel = <2>;
+	};
+};

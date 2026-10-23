@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: Apache-2.0
+
+sample:
+  name: zstep multi axis
+tests:
+  sample.zstep.multi_axis:
+    tags:
+      - stepper
+    platform_allow:
+      - native_sim
+      - native_sim/native/64
+      - nucleo_f446re
+      - nrf52840dk/nrf52840
+      - rpi_pico
+    integration_platforms:
+      - native_sim/native/64
+    harness: console
+    harness_config:
+      type: one_line
+      regex:
+        - "done"
