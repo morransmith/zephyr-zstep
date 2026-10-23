@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: Apache-2.0
+
+mainmenu "zstep ramp test"
+
+source "Kconfig.zephyr"
+
+config TEST_ZSTEP_RAMP
+	bool
+	default y
+	select ZSTEP_RAMP

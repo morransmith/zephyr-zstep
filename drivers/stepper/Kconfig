@@ -1,1 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
+
+config ZSTEP_RAMP
+	bool
+	help
+	  Integer trapezoidal ramp generator used by the zstep drivers.
