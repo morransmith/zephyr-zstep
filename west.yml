@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: Apache-2.0
+
+manifest:
+  remotes:
+    - name: zephyrproject-rtos
+      url-base: https://github.com/zephyrproject-rtos
+
+  projects:
+    # Zephyr without its modules; west-commands provides west build and twister
+    - name: zephyr
+      remote: zephyrproject-rtos
+      revision: v4.4.2
+      west-commands: scripts/west-commands.yml
+
+  self:
+    path: zephyr-zstep
