@@ -2,7 +2,7 @@
 
 /**
  * @file
- * @brief Synchronized group moves of zstep,step-dir motors.
+ * @brief Synchronized group moves and input shaping of zstep,step-dir motors.
  */
 
 #ifndef ZSTEP_INCLUDE_ZSTEP_ZSTEP_H_
@@ -37,6 +37,18 @@ extern "C" {
  */
 int zstep_group_move_by(const struct device *const devs[], const int32_t steps[], size_t count,
 			const struct stepper_ctrl_ramp *ramp);
+
+/** Input shapers, in the order of the input-shaper devicetree property. */
+enum zstep_shaper_type {
+	/** No shaping. */
+	ZSTEP_SHAPER_NONE,
+	/** Zero vibration: 2 impulses over half a period. */
+	ZSTEP_SHAPER_ZV,
+	/** Zero vibration and derivative: 3 impulses over one period. */
+	ZSTEP_SHAPER_ZVD,
+	/** Extra-insensitive: 3 impulses over one period, damping ratio up to 0.3. */
+	ZSTEP_SHAPER_EI,
+};
 
 #ifdef __cplusplus
 }

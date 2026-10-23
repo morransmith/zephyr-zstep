@@ -2,8 +2,9 @@
 
 config ZSTEP_RAMP
 	bool
+	select REQUIRES_FULL_LIBC
 	help
-	  Integer trapezoidal ramp generator used by the zstep drivers.
+	  Integer trapezoidal ramp generator and input shaper used by the zstep drivers.
 
 config ZSTEP_STEP_DIR
 	bool "Ramped step/dir stepper motion controller"
