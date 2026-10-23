@@ -1,0 +1,38 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+
+#include <zephyr/dt-bindings/gpio/gpio.h>
+
+/ {
+	spy: gpio-spy {
+		compatible = "zstep,test-gpio-spy";
+		gpio-controller;
+		#gpio-cells = <2>;
+		ngpios = <8>;
+	};
+
+	motor_a: motor-a {
+		compatible = "zstep,step-dir";
+		step-gpios = <&spy 0 GPIO_ACTIVE_HIGH>;
+		dir-gpios = <&spy 1 GPIO_ACTIVE_HIGH>;
+		counter = <&counter0>;
+		counter-channel = <0>;
+	};
+
+	motor_b: motor-b {
+		compatible = "zstep,step-dir";
+		step-gpios = <&spy 2 GPIO_ACTIVE_HIGH>;
+		dir-gpios = <&spy 3 GPIO_ACTIVE_HIGH>;
+		counter = <&counter0>;
+		counter-channel = <1>;
+		invert-direction;
+	};
+
+	motor_c: motor-c {
+		compatible = "zstep,step-dir";
+		step-gpios = <&spy 4 GPIO_ACTIVE_HIGH>;
+		dir-gpios = <&spy 5 GPIO_ACTIVE_HIGH>;
+		counter = <&counter0>;
+		counter-channel = <2>;
+		dual-edge-step;
+	};
+};
