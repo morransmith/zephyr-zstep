@@ -7,7 +7,7 @@ zstep is a step/dir stepper motion controller for Zephyr, aimed at CNC machines 
 - Motion of each motor: trapezoidal acceleration ramps with separate acceleration, deceleration and speed limits. Targets, direction and speed may change while the motor runs.
 - Several motors on one hardware counter, each on its own alarm channel, with independent timing.
 - Synchronized group moves: several axes start on the same counter tick with proportionally scaled profiles, so the tool moves along a straight line.
-- Input shaping against the resonance of the frame.
+- Input shaping against the resonance of the frame: ZV, ZVD and EI.
 
 The driver chip (enable, micro-step resolution) stays with the upstream `stepper` drivers, such as `ti,drv84xx`, `allegro,a4979` and `adi,tmc2209`. zstep only generates the step and direction signals.
 
@@ -59,14 +59,63 @@ Without an acceleration limit the motor runs at constant speed. A target behind 
 
 `zstep_group_move_by()` takes idle axes on one counter and arms all of them for the same counter tick, `CONFIG_ZSTEP_GROUP_START_US` in the future. The axis with the longest move follows the limits. `zstep_profile_scale()` slows the other axes down in proportion to their share of the move, so the axes stay proportional over time and the tool moves along a straight line. Every axis reports `STEPPER_CTRL_EVENT_STEPS_COMPLETED` itself. A sequence of group moves stops between segments.
 
-## 7. Testing
+## 7. Input shaping
+
+An input shaper convolves the commanded motion with a few weighted impulses, p(t) = sum of A_i x(t - T_i), chosen so that the oscillations excited by the impulses cancel each other at the resonance frequency.
+
+The driver keeps the commanded steps in a ring buffer of `input-shaper-buffer-steps` entries, 8 bytes each. Each impulse replays them with its own delay and a weight in units of 1/65536 step (`ZSTEP_SHAPER_UNIT`). A physical step is made whenever the weighted sum crosses a whole step. One step of hysteresis keeps the output from dithering at reversals, and every move ends on its target. The merge costs a few additions per step and no division. Without a shaper it is a single impulse and gives the same edges as the unshaped driver.
+
+The driver keeps the commanded motion (ramp, target, reversals) separate from the physical steps, which follow the shaped stream. The physical motion lags the command by the shaper duration, and events and `is_moving` report the end of the physical motion.
+
+| Shaper | Impulses | Duration | Source |
+|---|---|---|---|
+| ZV | 2 | half a damped period | Singer & Seering |
+| ZVD | 3 | one damped period | Singer & Seering |
+| EI | 3 | one damped period | NASA CR-189439, eq. 22, with V = 0.05; fitted for damping ratios 0 to 0.3 |
+
+The weights and delays are computed in float with `expf` and `sqrtf` from a full C library when a shaper is selected, and linked only when a shaper is used. The step interrupt uses the integer weights and delays.
+
+The buffer must hold the commanded steps of the shaper duration at the highest speed plus 8 look-ahead steps (`zstep_shaper_fits()`). `stepper_ctrl_configure_ramp()` and `zstep_set_input_shaper()` reject a speed the buffer cannot hold. EI at 40 Hz and 40000 steps/s needs about 1100 entries.
+
+Residual vibration in steps, from the log of `tests/unit/shaper`: a move at 400000 steps/s^2 and 40000 steps/s, the worst of 3000, 4500 and 6000 steps, shapers tuned to 40 Hz and damping 0.1, real damping 0.05.
+
+| Real resonance | 28 Hz | 32 Hz | 36 Hz | 40 Hz | 44 Hz | 48 Hz | 52 Hz |
+|---|---|---|---|---|---|---|---|
+| no shaper | 21.60 | 8.29 | 7.97 | 7.65 | 4.68 | 3.18 | 3.77 |
+| ZVD | 4.22 | 1.05 | 0.47 | 0.40 | 0.51 | 0.67 | 0.96 |
+| EI | 3.38 | 0.76 | 0.34 | 0.31 | 0.49 | 0.62 | 0.86 |
+
+At a 40 Hz resonance with a real damping of 0.02 to 0.15, ZVD reduces the residual at least 11.6 times and EI at least 18.5 times.
+
+### Micro-stepping
+
+Shaping works in micro-steps and rounds the shaped motion to whole micro-steps. With coarse steps the step staircase excites the resonance by itself, and the shaper cannot cancel that. The table gives the residual in full steps of the same physical move at different resolutions, with EI tuned to 40 Hz and damping 0.1: moves of 200, 300 and 400 full steps at 2500 full steps/s and 25000 full steps/s^2, real resonance 40 Hz with damping 0.05. It was computed with the resonance model of `tests/unit/shaper` outside the test suite.
+
+| Micro-steps | 1 | 4 | 16 | 64 |
+|---|---|---|---|---|
+| no shaper | 0.459 | 0.398 | 0.467 | 0.483 |
+| EI | 0.528 | 0.106 | 0.023 | 0.028 |
+| reduction | 0.9x | 3.7x | 20.7x | 17.4x |
+
+When the axis has a `stepper-driver`, the driver reads its resolution with `stepper_get_micro_step_res()` at start-up, in `zstep_set_input_shaper()` and in `stepper_ctrl_configure_ramp()`, and logs a warning below 16 micro-steps. Positions and speeds are in micro-steps, so the buffer grows with the resolution: EI at 40 Hz and 2500 full steps/s needs about 1000 entries at 16 micro-steps and 4000 at 64.
+
+### Behavior
+
+- Without a ramp, `stepper_ctrl_stop()` halts at once and drops the steps still being shaped. With a ramp, the motor brakes and the shaped motion settles first.
+- Corners are rounded slightly when the axes of a group use different shapers.
+- Step intervals vary while the impulses overlap.
+
+## 8. Testing
 
 - `tests/unit/ramp` compares every step against the analytic trapezoid, requires moves of 1 to 2000 steps to end on target and covers braking distance, speed changes, reversal, limits and the straightness of a group.
-- `tests/integration/conformance` runs the upstream `stepper_ctrl` API suite of the Zephyr tree against the driver.
-- `tests/integration/timing` records every GPIO edge with its counter tick (`src/gpio_spy.c`) and checks pulse width and DIR setup and hold, bit-exact step times, that the edges of a motor are identical whether it runs alone or together with others, and the group start on one tick.
-- `samples/multi_axis` runs on native_sim with a console harness.
+- `tests/unit/shaper` checks the weights and delays and their normalization, that every move ends on target, the agreement with the ideal convolution and reversals without dithering. It drives a damped resonance model with the shaped steps and requires ZVD and EI to reduce the residual at least 3 times between 0.8 and 1.2 of the tuned frequency and for a real damping of 0.02 to 0.15.
+- `tests/integration/conformance` runs the upstream `stepper_ctrl` API suite of the Zephyr tree against the driver, without a shaper, with ZVD and with EI.
+- `tests/integration/timing` records every GPIO edge with its counter tick (`src/gpio_spy.c`) and checks pulse width and DIR setup and hold, bit-exact step times, that the edges of a motor are identical whether it runs alone or together with others, and the group start on one tick. For a ZVD and an EI motor it checks the edges against the shaper model, the shaper lag, reversal, stop and halt and switching the shaper at run time, and the micro-stepping warning through the upstream fake stepper driver and a capturing log backend (`src/log_capture.c`).
+- `samples/multi_axis` runs on native_sim with a console harness, with and without `shaped.overlay`.
 - CI runs on Woodpecker (`.woodpecker/build.yaml`): twister runs the tests and the sample on `native_sim` and `native_sim/native/64` and builds the sample for `nucleo_f446re`, `nrf52840dk/nrf52840` and `rpi_pico` in a second workspace with the manifest of Zephyr v4.4.2 and only the HALs of these boards. The step `docs` builds the documentation of `include/zstep` with `doxygen doc/Doxyfile`, which fails on any warning.
 
 ## References
 
 - D. Austin, "Generate stepper-motor speed profiles in real time", Embedded Systems Programming, January 2005. https://www.embedded.com/generate-stepper-motor-speed-profiles-in-real-time/
+- N. C. Singer, W. P. Seering, "Preshaping command inputs to reduce system vibration", ASME Journal of Dynamic Systems, Measurement, and Control, 112(1), 1990.
+- Convolve, Inc., "Minimizing structural vibrations with input shaping", final report for contract NAS5-32034, NASA CR-189439, January 1995. https://ntrs.nasa.gov/citations/19950024365
